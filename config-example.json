@@ -1,0 +1,32 @@
+{
+  "brokerUrl": "ssl://your-broker-host:61617",
+  "queue": "STRESS.PERF.TEST",
+  "useTopic": false,
+
+  "ssl": {
+    "keystorePath": "/path/to/client-keystore.jks",
+    "keystorePassword": "changeit",
+    "keyPassword": "changeit",
+    "truststorePath": "/path/to/truststore.jks",
+    "truststorePassword": "changeit",
+    "keystoreType": "JKS",
+    "tlsVersion": "TLSv1.3"
+  },
+
+  "threads": 10,
+  "totalMessages": 100000,
+  "durationSeconds": 0,
+  "ratePerThread": 0,
+  "messageSize": 4096,
+
+  "schemaValidation": true,
+  "schemaPath": null,
+  "idStartValue": 1,
+
+  "persistent": true,
+  "batchSize": 0,
+  "connectionPoolSize": 2,
+
+  "warmupMessages": 500,
+  "reportIntervalSeconds": 5
+}

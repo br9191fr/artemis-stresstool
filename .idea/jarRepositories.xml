@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteRepositoriesConfiguration">
+    <remote-repository>
+      <option name="id" value="central" />
+      <option name="name" value="Central Repository" />
+      <option name="url" value="https://repo.maven.apache.org/maven2" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="dss-spi" />
+      <option name="name" value="dss spi" />
+      <option name="url" value="https://mvnrepository.com/artifact/eu.europa.ec.joinup.sd-dss/dss-spi" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="thirdparty" />
+      <option name="name" value="Third party software components" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/repositories/thirdparty/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="central" />
+      <option name="name" value="Maven Central repository" />
+      <option name="url" value="https://repo1.maven.org/maven2" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="Shibboleth" />
+      <option name="name" value="Shibboleth opensaml-core.v4.x" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/repository/Shibboleth/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="cc-nexus" />
+      <option name="name" value="Cecurity Projects Repository" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/groups/cecurity" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="maven-central" />
+      <option name="name" value="Maven Central" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/repositories/central/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="public" />
+      <option name="name" value="Public" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/groups/public/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="jboss.community" />
+      <option name="name" value="JBoss Community repository" />
+      <option name="url" value="https://repository.jboss.org/nexus/content/repositories/public/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="dss-document" />
+      <option name="name" value="dss document" />
+      <option name="url" value="https://mvnrepository.com/artifact/eu.europa.ec.joinup.sd-dss/dss-document" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="thirdparty-snapshots" />
+      <option name="name" value="Third party software components" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/repositories/thirdpartysnapshots/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="cc-nexus-snapshots" />
+      <option name="name" value="Cecurity SNAPSHOTS Repository" />
+      <option name="url" value="https://nexus.cecurity.pro/nexus/content/repositories/snapshots/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="dss-ec" />
+      <option name="name" value="dss xades" />
+      <option name="url" value="https://mvnrepository.com/artifact/eu.europa.ec.joinup.sd-dss/dss-xades" />
+    </remote-repository>
+  </component>
+</project>
