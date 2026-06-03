@@ -8,7 +8,7 @@ import com.artemis.stress.xml.XmlSchemaValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jakarta.jms.*;
+import javax.jms.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 

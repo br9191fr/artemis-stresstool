@@ -6,8 +6,8 @@ import org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jakarta.jms.Connection;
-import jakarta.jms.JMSException;
+import javax.jms.Connection;
+import javax.jms.JMSException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
