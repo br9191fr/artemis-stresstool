@@ -59,7 +59,7 @@ public class StressConfig {
 
     // ── Schema validation ─────────────────────────────────────────────────────
     /** Enable XML schema validation before every send. */
-    private boolean schemaValidation = true;
+    private boolean schemaValidation = false;
     /**
      * Path to a custom XSD file.  When null the bundled {@code stress-message.xsd}
      * is used (only applicable in generated mode).

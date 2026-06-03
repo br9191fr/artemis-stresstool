@@ -62,7 +62,9 @@ public class ProducerOrchestrator {
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialise XmlPayloadGenerator", e);
         }
-
+        // TODO BRI
+        String xml = xmlGen.generate(121, 333);
+        log.info("Generated XML payload {} ", xml);
         // ── Connection pool ───────────────────────────────────────────────────
         log.info("Opening connection pool ({} connection(s))...", config.getConnectionPoolSize());
         ConnectionPool pool;

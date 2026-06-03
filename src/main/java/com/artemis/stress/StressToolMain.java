@@ -116,7 +116,7 @@ public class StressToolMain implements Callable<Integer> {
     // ── Schema validation ─────────────────────────────────────────────────────
     @Option(names = {"--schema-validation"},
             description = "Validate every XML document against XSD before sending (default: true)",
-            defaultValue = "true")
+            defaultValue = "false")
     private boolean schemaValidation;
 
     @Option(names = {"--schema-path"},

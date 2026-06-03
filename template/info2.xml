@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Artemis Stress Tool - XML Template Example
+     Available placeholders:
+       ${NUMERIC_ID}  - globally unique strictly-increasing numeric ID (long)
+       ${SEQ}         - global sequence number (long, same as NUMERIC_ID in generated mode)
+       ${UUID}        - random UUID
+       ${TS}          - ISO-8601 timestamp
+       ${PRODUCER_ID} - producer thread ID (int)
+       ${RANDOM}      - random long 0..999999
+
+     IMPORTANT: The <Header> element MUST be present so that the tool can
+     inject/update <NumericId> automatically even if you omit the placeholder.
+-->
+<StressMessage>
+
+    <Header>
+        <!-- NumericId is MANDATORY per stress-message.xsd.
+             The tool injects the correct value here even without this placeholder.
+             Include ${NUMERIC_ID} to also embed it in other text content below. -->
+        <NumericId>${NUMERIC_ID}</NumericId>
+        <MessageId>${UUID}</MessageId>
+        <Sequence>${SEQ}</Sequence>
+        <ProducerId>${PRODUCER_ID}</ProducerId>
+        <Timestamp>${TS}</Timestamp>
+        <Version>1.1</Version>
+    </Header>
+
+    <Body>
+        <Order>
+            <OrderId>ORD-${NUMERIC_ID}</OrderId>
+            <Status>PENDING</Status>
+            <Customer>
+                <Id>CUST-${RANDOM}</Id>
+                <Name>Customer ${RANDOM}</Name>
+                <Email>customer${RANDOM}@example.com</Email>
+            </Customer>
+            <Items>
+                <Item>
+                    <SKU>SKU-${RANDOM}</SKU>
+                    <Quantity>1</Quantity>
+                    <UnitPrice>99.99</UnitPrice>
+                    <Total>99.99</Total>
+                </Item>
+            </Items>
+            <Total>99.99</Total>
+        </Order>
+    </Body>
+
+</StressMessage>

@@ -19,7 +19,7 @@
   "ratePerThread": 0,
   "messageSize": 4096,
 
-  "schemaValidation": true,
+  "schemaValidation": false,
   "schemaPath": null,
   "idStartValue": 1,
 
