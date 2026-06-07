@@ -27,9 +27,11 @@ public class ConnectionPool implements AutoCloseable {
     private final List<Connection> connections;
     private final AtomicInteger roundRobinIndex = new AtomicInteger(0);
 
-    public ConnectionPool(StressConfig config) {
+    public ConnectionPool(StressConfig config, boolean useSSL) {
         // Apply SSL system properties before creating the factory
-        SslContextFactory.configureSystemSslProperties(config);
+        if (useSSL) {
+            SslContextFactory.configureSystemSslProperties(config);
+        }
 
         connections = new ArrayList<>(config.getConnectionPoolSize());
 

@@ -41,12 +41,12 @@ public class StressToolMain implements Callable<Integer> {
     // ── Broker connection ─────────────────────────────────────────────────────
     @Option(names = {"-u", "--broker-url"},
             description = "Broker URL (default: ssl://localhost:61617)",
-            defaultValue = "ssl://localhost:61617")
+            defaultValue = "tcp://localhost:61616?user=admin&password=admin")
     private String brokerUrl;
 
     @Option(names = {"-q", "--queue"},
             description = "Destination queue/topic name (default: STRESS.TEST)",
-            defaultValue = "STRESS.TEST")
+            defaultValue = "stressQueue")
     private String queue;
 
     @Option(names = {"--topic"}, description = "Use topic instead of queue")
@@ -91,7 +91,7 @@ public class StressToolMain implements Callable<Integer> {
 
     @Option(names = {"-m", "--messages"},
             description = "Total messages to send, 0 = unlimited (default: 10000)",
-            defaultValue = "10000")
+            defaultValue = "10")
     private long totalMessages;
 
     @Option(names = {"--duration"},

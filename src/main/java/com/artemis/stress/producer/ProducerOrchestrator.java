@@ -68,8 +68,9 @@ public class ProducerOrchestrator {
         // ── Connection pool ───────────────────────────────────────────────────
         log.info("Opening connection pool ({} connection(s))...", config.getConnectionPoolSize());
         ConnectionPool pool;
+        boolean useSSL = false;
         try {
-            pool = new ConnectionPool(config);
+            pool = new ConnectionPool(config, useSSL);
         } catch (Exception e) {
             log.error("Cannot connect to broker: {}", e.getMessage());
             throw new RuntimeException(e);
