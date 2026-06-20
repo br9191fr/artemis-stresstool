@@ -65,6 +65,7 @@ public class ProducerOrchestrator {
         // TODO BRI
         String xml = xmlGen.generate(121, 333);
         log.info("Generated XML payload {} ", xml);
+        log.info("XML payload size: {} bytes", xml.length());
         // ── Connection pool ───────────────────────────────────────────────────
         log.info("Opening connection pool ({} connection(s))...", config.getConnectionPoolSize());
         ConnectionPool pool;

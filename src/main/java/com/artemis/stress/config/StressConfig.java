@@ -49,7 +49,7 @@ public class StressConfig {
     private long totalMessages = 10_000;
     private long durationSeconds = 0;
     private int ratePerThread = 0;
-    private int messageSize = 1024;
+    private int messageSize = 4096;
     private String xmlTemplatePath;
 
     // ── JMS ───────────────────────────────────────────────────────────────────
