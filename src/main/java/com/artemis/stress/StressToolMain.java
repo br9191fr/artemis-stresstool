@@ -1,8 +1,10 @@
 package com.artemis.stress;
 
 import com.artemis.stress.config.StressConfig;
+import com.artemis.stress.consumer.ConsumerOrchestrator;
 import com.artemis.stress.metrics.MetricsCollector;
 import com.artemis.stress.metrics.ReportPrinter;
+import com.artemis.stress.producer.ConnectionPool;
 import com.artemis.stress.producer.ProducerOrchestrator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -13,213 +15,202 @@ import picocli.CommandLine.Option;
 
 import java.io.File;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Entry point for the Artemis XML Stress Tool.
- *
- * Usage:
- *   java -jar artemis-stress-tool.jar --config config.json
- *   java -jar artemis-stress-tool.jar --broker-url ssl://localhost:61617 \
- *       --queue TEST.QUEUE --threads 10 --messages 10000 \
- *       --keystore client.jks --keystore-password changeit \
- *       --truststore truststore.jks --truststore-password changeit
- */
 @Command(
     name = "artemis-stress",
     mixinStandardHelpOptions = true,
-    version = "1.0.0",
-    description = "Multi-threaded stress and performance tool for Apache Artemis (X.509 auth)"
+    version = "1.1.0",
+    description = "Multi-threaded XML stress tool for Apache Artemis"
 )
 public class StressToolMain implements Callable<Integer> {
 
     private static final Logger log = LoggerFactory.getLogger(StressToolMain.class);
 
-    // ── Config file (overrides individual flags) ──────────────────────────────
-    @Option(names = {"-c", "--config"}, description = "Path to JSON config file (overrides other options)")
+    @Option(names = {"-c", "--config"},
+            description = "JSON config file (overrides all other options)")
     private File configFile;
 
-    // ── Broker connection ─────────────────────────────────────────────────────
+    @Option(names = {"--mode"},
+            description = "PRODUCE | CONSUME | BOTH (default: PRODUCE)",
+            defaultValue = "PRODUCE")
+    private StressConfig.Mode mode;
+
     @Option(names = {"-u", "--broker-url"},
-            description = "Broker URL (default: ssl://localhost:61617)",
-            defaultValue = "tcp://localhost:61616?user=admin&password=admin")
+            description = "Broker URL (default: tcp://localhost:61616)",
+            defaultValue = "tcp://localhost:61616")
     private String brokerUrl;
 
     @Option(names = {"-q", "--queue"},
-            description = "Destination queue/topic name (default: STRESS.TEST)",
-            defaultValue = "stressQueue")
+            description = "Queue/topic name (default: STRESS.TEST)",
+            defaultValue = "STRESS.TEST")
     private String queue;
 
     @Option(names = {"--topic"}, description = "Use topic instead of queue")
     private boolean useTopic;
 
-    // ── SSL / X.509 ───────────────────────────────────────────────────────────
-    @Option(names = {"-k", "--keystore"},
-            description = "Path to client keystore (JKS or PKCS12)")
+    // ── Credentials ───────────────────────────────────────────────────────────
+    @Option(names = {"--user"},
+            description = "JMS username (takes priority over user= in broker URL)")
+    private String user;
+
+    @Option(names = {"--password"},
+            description = "JMS password (takes priority over password= in broker URL)")
+    private String password;
+
+    // ── SSL ───────────────────────────────────────────────────────────────────
+    @Option(names = {"-k", "--keystore"},          description = "Client keystore path (JKS or PKCS12)")
     private String keystorePath;
 
-    @Option(names = {"--keystore-password"},
-            description = "Keystore password")
+    @Option(names = {"--keystore-password"},       description = "Keystore password")
     private String keystorePassword;
 
-    @Option(names = {"--key-password"},
-            description = "Private key password (defaults to keystore password)")
+    @Option(names = {"--key-password"},            description = "Private key password (defaults to keystore-password)")
     private String keyPassword;
 
-    @Option(names = {"-t", "--truststore"},
-            description = "Path to truststore (JKS or PKCS12)")
+    @Option(names = {"-t", "--truststore"},        description = "Truststore path")
     private String truststorePath;
 
-    @Option(names = {"--truststore-password"},
-            description = "Truststore password")
+    @Option(names = {"--truststore-password"},     description = "Truststore password")
     private String truststorePassword;
 
-    @Option(names = {"--keystore-type"},
-            description = "Keystore type: JKS or PKCS12 (default: JKS)",
-            defaultValue = "JKS")
+    @Option(names = {"--keystore-type"},           description = "JKS or PKCS12 (auto-detected from .p12/.pfx)", defaultValue = "JKS")
     private String keystoreType;
 
-    @Option(names = {"--tls-version"},
-            description = "TLS protocol version (default: TLSv1.3)",
-            defaultValue = "TLSv1.3")
+    @Option(names = {"--tls-version"},             description = "TLS protocol version (default: TLSv1.3)", defaultValue = "TLSv1.3")
     private String tlsVersion;
 
-    // ── Load parameters ───────────────────────────────────────────────────────
-    @Option(names = {"-n", "--threads"},
-            description = "Number of producer threads (default: 4)",
-            defaultValue = "4")
+    // ── Producer ──────────────────────────────────────────────────────────────
+    @Option(names = {"-n", "--threads"},           description = "Producer threads (default: 4)",           defaultValue = "4")
     private int threads;
 
-    @Option(names = {"-m", "--messages"},
-            description = "Total messages to send, 0 = unlimited (default: 10000)",
-            defaultValue = "10")
+    @Option(names = {"-m", "--messages"},          description = "Total messages; 0=unlimited (default: 10000)", defaultValue = "10000")
     private long totalMessages;
 
-    @Option(names = {"--duration"},
-            description = "Max test duration in seconds, 0 = no limit (default: 0)",
-            defaultValue = "0")
+    @Option(names = {"--duration"},                description = "Max duration seconds; 0=no limit (default: 0)", defaultValue = "0")
     private long durationSeconds;
 
-    @Option(names = {"--rate"},
-            description = "Target messages/sec per thread, 0 = max speed (default: 0)",
-            defaultValue = "0")
+    @Option(names = {"--rate"},                    description = "Target msg/s per producer thread; 0=max (default: 0)", defaultValue = "0")
     private int ratePerThread;
 
-    @Option(names = {"--message-size"},
-            description = "Approximate XML payload size in bytes (default: 1024)",
-            defaultValue = "1024")
+    @Option(names = {"--message-size"},            description = "Approx XML payload bytes (default: 1024)", defaultValue = "1024")
     private int messageSize;
 
-    @Option(names = {"--xml-template"},
-            description = "Path to XML template file (use ${NUMERIC_ID}, ${SEQ}, ${UUID}, ${TS} as placeholders)")
+    @Option(names = {"--xml-template"},            description = "XML template file (placeholders: ${NUMERIC_ID}, ${SEQ}, ${UUID}, ${TS})")
     private String xmlTemplatePath;
 
-    // ── Schema validation ─────────────────────────────────────────────────────
-    @Option(names = {"--schema-validation"},
-            description = "Validate every XML document against XSD before sending (default: true)",
-            defaultValue = "false")
-    private boolean schemaValidation;
+    // ── Consumer ──────────────────────────────────────────────────────────────
+    @Option(names = {"--consumer-threads"},        description = "Consumer threads (default: 1)",            defaultValue = "1")
+    private int consumerThreads;
 
-    @Option(names = {"--schema-path"},
-            description = "Path to custom XSD file (default: bundled stress-message.xsd)")
-    private String schemaPath;
+    @Option(names = {"--consumer-timeout"},        description = "Consumer receive timeout ms (default: 5000)", defaultValue = "5000")
+    private int consumerReceiveTimeout;
 
-    @Option(names = {"--id-start"},
-            description = "First numeric ID value. Useful for multi-instance runs (default: 1)",
-            defaultValue = "1")
-    private long idStartValue;
-
-    // ── JMS options ───────────────────────────────────────────────────────────
-    @Option(names = {"--persistent"},
-            description = "Send persistent messages (default: true)",
-            defaultValue = "true")
+    // ── JMS ───────────────────────────────────────────────────────────────────
+    @Option(names = {"--persistent"},              description = "Persistent delivery (default: true)",      defaultValue = "true")
     private boolean persistent;
 
-    @Option(names = {"--batch-size"},
-            description = "Commit batch size for transacted sessions (0 = auto-ack, default: 0)",
-            defaultValue = "0")
+    @Option(names = {"--batch-size"},              description = "Transacted batch size; 0=AUTO_ACK (default: 0)", defaultValue = "0")
     private int batchSize;
 
-    @Option(names = {"--connection-pool"},
-            description = "Number of JMS connections shared across threads (default: 1)",
-            defaultValue = "1")
+    @Option(names = {"--connection-pool"},         description = "Shared JMS connections (default: 1)",      defaultValue = "1")
     private int connectionPoolSize;
 
-    @Option(names = {"--warmup"},
-            description = "Warmup messages to send before recording metrics (default: 100)",
-            defaultValue = "100")
-    private int warmupMessages;
+    // ── Schema ────────────────────────────────────────────────────────────────
+    @Option(names = {"--schema-validation"},       description = "Validate XML before send (default: true)", defaultValue = "true")
+    private boolean schemaValidation;
+
+    @Option(names = {"--schema-path"},             description = "Custom XSD (default: bundled stress-message.xsd)")
+    private String schemaPath;
+
+    @Option(names = {"--id-start"},                description = "First numeric ID value (default: 1)",      defaultValue = "1")
+    private long idStartValue;
 
     // ── Reporting ─────────────────────────────────────────────────────────────
-    @Option(names = {"--report-interval"},
-            description = "Live metrics print interval in seconds (default: 5)",
-            defaultValue = "5")
+    @Option(names = {"--warmup"},                  description = "Warmup messages excluded from metrics (default: 100)", defaultValue = "100")
+    private int warmupMessages;
+
+    @Option(names = {"--report-interval"},         description = "Live metrics interval seconds (default: 5)", defaultValue = "5")
     private int reportIntervalSeconds;
 
-    @Option(names = {"--output"},
-            description = "Write final report to file (CSV format)")
+    @Option(names = {"--output"},                  description = "CSV report output file")
     private File outputFile;
 
     // ─────────────────────────────────────────────────────────────────────────
 
     public static void main(String[] args) {
-        int exitCode = new CommandLine(new StressToolMain()).execute(args);
-        System.exit(exitCode);
+        System.exit(new CommandLine(new StressToolMain()).execute(args));
     }
 
     @Override
     public Integer call() throws Exception {
         printBanner();
 
-        // Build config (file wins over CLI flags)
-        StressConfig config;
-        if (configFile != null) {
-            log.info("Loading configuration from {}", configFile.getAbsolutePath());
-            config = new ObjectMapper().readValue(configFile, StressConfig.class);
-        } else {
-            config = buildConfigFromCli();
-        }
+        StressConfig config = configFile != null
+                ? new ObjectMapper().readValue(configFile, StressConfig.class)
+                : buildConfigFromCli();
 
         config.validate();
         log.info("Configuration validated:\n{}", config.summary());
 
-        // Metrics collector (shared across all threads)
-        MetricsCollector metrics = new MetricsCollector(config.getWarmupMessages());
-
-        // Live reporter
-        ReportPrinter reporter = new ReportPrinter(metrics, config.getReportIntervalSeconds());
+        MetricsCollector metrics  = new MetricsCollector(config.getWarmupMessages());
+        ReportPrinter    reporter = new ReportPrinter(metrics, config);
         Thread reporterThread = new Thread(reporter, "metrics-reporter");
         reporterThread.setDaemon(true);
         reporterThread.start();
 
-        // Orchestrate producers
-        ProducerOrchestrator orchestrator = new ProducerOrchestrator(config, metrics);
-
         long startMs = System.currentTimeMillis();
         try {
-            orchestrator.run();
+            switch (config.getMode()) {
+
+                case PRODUCE ->
+                    new ProducerOrchestrator(config, metrics).run();
+
+                case CONSUME -> {
+                    ConnectionPool pool = new ConnectionPool(config);
+                    AtomicBoolean stopFlag = new AtomicBoolean(false);
+                    if (config.getDurationSeconds() > 0) {
+                        Thread timer = new Thread(() -> {
+                            try { Thread.sleep(config.getDurationSeconds() * 1000L); }
+                            catch (InterruptedException ignored) {}
+                            log.info("Duration limit reached — stopping consumers");
+                            stopFlag.set(true);
+                        }, "duration-timer");
+                        timer.setDaemon(true);
+                        timer.start();
+                    }
+                    try { new ConsumerOrchestrator(config, pool, metrics).run(stopFlag); }
+                    finally { pool.close(); }
+                }
+
+                case BOTH ->
+                    // ProducerOrchestrator manages consumer lifecycle in BOTH mode
+                    new ProducerOrchestrator(config, metrics).run();
+            }
         } finally {
             reporter.stop();
             reporterThread.join(2000);
         }
-        long elapsedMs = System.currentTimeMillis() - startMs;
 
-        // Final report
+        long elapsedMs = System.currentTimeMillis() - startMs;
         reporter.printFinalReport(elapsedMs);
+
         if (outputFile != null) {
             reporter.writeCsvReport(outputFile, elapsedMs);
-            log.info("Report written to {}", outputFile.getAbsolutePath());
+            log.info("CSV report written to {}", outputFile.getAbsolutePath());
         }
 
         return metrics.hasErrors() ? 1 : 0;
     }
 
-    // ─── Helpers ──────────────────────────────────────────────────────────────
-
     private StressConfig buildConfigFromCli() {
         StressConfig c = new StressConfig();
+        c.setMode(mode);
         c.setBrokerUrl(brokerUrl);
         c.setQueue(queue);
         c.setUseTopic(useTopic);
+        c.setUser(user);
+        c.setPassword(password);
         c.setKeystorePath(keystorePath);
         c.setKeystorePassword(keystorePassword);
         c.setKeyPassword(keyPassword != null ? keyPassword : keystorePassword);
@@ -233,22 +224,24 @@ public class StressToolMain implements Callable<Integer> {
         c.setRatePerThread(ratePerThread);
         c.setMessageSize(messageSize);
         c.setXmlTemplatePath(xmlTemplatePath);
+        c.setConsumerThreads(consumerThreads);
+        c.setConsumerReceiveTimeout(consumerReceiveTimeout);
         c.setPersistent(persistent);
         c.setBatchSize(batchSize);
         c.setConnectionPoolSize(connectionPoolSize);
-        c.setWarmupMessages(warmupMessages);
-        c.setReportIntervalSeconds(reportIntervalSeconds);
         c.setSchemaValidation(schemaValidation);
         c.setSchemaPath(schemaPath);
         c.setIdStartValue(idStartValue);
+        c.setWarmupMessages(warmupMessages);
+        c.setReportIntervalSeconds(reportIntervalSeconds);
         return c;
     }
 
     private void printBanner() {
         System.out.println("""
             ╔══════════════════════════════════════════════════════════╗
-            ║         ARTEMIS XML STRESS TOOL  v1.0.0                 ║
-            ║  Multi-threaded • X.509 Auth • Live Metrics             ║
+            ║         ARTEMIS XML STRESS TOOL  v1.1.0                 ║
+            ║  Produce • Consume • E2E Latency • X.509 / user+pw      ║
             ╚══════════════════════════════════════════════════════════╝
             """);
     }

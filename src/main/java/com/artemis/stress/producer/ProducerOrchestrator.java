@@ -1,6 +1,7 @@
 package com.artemis.stress.producer;
 
 import com.artemis.stress.config.StressConfig;
+import com.artemis.stress.consumer.ConsumerOrchestrator;
 import com.artemis.stress.metrics.MetricsCollector;
 import com.artemis.stress.xml.MessageIdGenerator;
 import com.artemis.stress.xml.XmlPayloadGenerator;
@@ -15,22 +16,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Orchestrates the lifecycle of all producer threads.
- *
- * <p>Shared objects created here and passed down to every thread:
- * <ul>
- *   <li>{@link MessageIdGenerator} — single AtomicLong, guarantees unique IDs.</li>
- *   <li>{@link XmlSchemaValidator} — Schema compiled once, Validator per call.</li>
- *   <li>{@link XmlPayloadGenerator} — DOM factory, thread-locals inside.</li>
- *   <li>{@link ConnectionPool} — round-robin JMS connections.</li>
- * </ul>
- * </p>
+ * Orchestrates producer threads and, in BOTH mode, starts consumers
+ * concurrently then signals them to stop after all producers finish.
  */
 public class ProducerOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(ProducerOrchestrator.class);
 
-    private final StressConfig config;
+    private final StressConfig     config;
     private final MetricsCollector metrics;
 
     public ProducerOrchestrator(StressConfig config, MetricsCollector metrics) {
@@ -39,37 +32,37 @@ public class ProducerOrchestrator {
     }
 
     public void run() throws InterruptedException {
-        AtomicLong   globalCounter = new AtomicLong(0);
-        AtomicBoolean stopFlag     = new AtomicBoolean(false);
+        AtomicLong    globalCounter = new AtomicLong(0);
+        AtomicBoolean stopFlag      = new AtomicBoolean(false);
 
-        // ── Unique numeric-ID generator (shared across ALL threads) ───────────
         MessageIdGenerator idGenerator = new MessageIdGenerator(config.getIdStartValue());
 
-        // ── Schema validator (shared; Schema is thread-safe after construction) ─
         XmlSchemaValidator validator = null;
         if (config.isSchemaValidation()) {
             validator = new XmlSchemaValidator(config.getSchemaPath());
-            log.info("Schema validation ENABLED — source={}",
-                    validator.getSchemaSource());
+            log.info("Schema validation ENABLED — source={}", validator.getSchemaSource());
         } else {
             log.info("Schema validation DISABLED");
         }
 
-        // ── XML payload generator ─────────────────────────────────────────────
         XmlPayloadGenerator xmlGen;
         try {
             xmlGen = new XmlPayloadGenerator(config, idGenerator);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialise XmlPayloadGenerator", e);
         }
-        // TODO BRI
-        String xml = xmlGen.generate(121, 333);
-        log.info("Generated XML payload {} ", xml);
-        log.info("XML payload size: {} bytes", xml.length());
-        // ── Connection pool ───────────────────────────────────────────────────
+
+        // Preview
+        try {
+            String preview = xmlGen.generate(121L, 333);
+            log.info("Generated XML payload {}", preview);
+            log.info("XML payload size: {} bytes", preview.getBytes().length);
+        } catch (Exception e) {
+            log.warn("Could not generate preview: {}", e.getMessage());
+        }
+
         log.info("Opening connection pool ({} connection(s))...", config.getConnectionPoolSize());
         ConnectionPool pool;
-        boolean useSSL = false;
         try {
             pool = new ConnectionPool(config);
         } catch (Exception e) {
@@ -77,51 +70,58 @@ public class ProducerOrchestrator {
             throw new RuntimeException(e);
         }
 
-        // ── Duration timer ────────────────────────────────────────────────────
+        // Duration timer
         ScheduledExecutorService durationTimer = null;
         if (config.getDurationSeconds() > 0) {
             durationTimer = Executors.newSingleThreadScheduledExecutor(
                     r -> { Thread t = new Thread(r, "duration-timer"); t.setDaemon(true); return t; });
-            durationTimer.schedule(
-                    () -> {
-                        log.info("Duration limit ({}s) reached — signalling stop",
-                                config.getDurationSeconds());
-                        stopFlag.set(true);
-                    },
-                    config.getDurationSeconds(), TimeUnit.SECONDS);
+            durationTimer.schedule(() -> {
+                log.info("Duration limit ({}s) reached — stopping", config.getDurationSeconds());
+                stopFlag.set(true);
+            }, config.getDurationSeconds(), TimeUnit.SECONDS);
         }
 
-        // ── Launch producer threads ───────────────────────────────────────────
-        ExecutorService executor = Executors.newFixedThreadPool(
-                config.getThreads(),
-                new ProducerThreadFactory());
+        // BOTH mode: start consumers BEFORE producers so no messages are missed
+        Thread consumerThread = null;
+        if (config.getMode() == StressConfig.Mode.BOTH) {
+            ConsumerOrchestrator co = new ConsumerOrchestrator(config, pool, metrics);
+            final AtomicBoolean sf = stopFlag;
+            consumerThread = new Thread(() -> {
+                try { co.run(sf); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }, "consumer-orchestrator");
+            consumerThread.setDaemon(false);
+            consumerThread.start();
+            log.info("Consumers started — producers starting now");
+        }
+
+        // Launch producers
+        ExecutorService exec = Executors.newFixedThreadPool(
+                config.getThreads(), new ProducerThreadFactory());
 
         List<Future<?>> futures = new ArrayList<>(config.getThreads());
         for (int i = 0; i < config.getThreads(); i++) {
-            XmlProducer producer = new XmlProducer(
-                    i, config, pool, xmlGen, validator, metrics, globalCounter, stopFlag);
-            futures.add(executor.submit(producer));
+            futures.add(exec.submit(new XmlProducer(
+                    i, config, pool, xmlGen, validator, metrics, globalCounter, stopFlag)));
         }
-
         log.info("All {} producer thread(s) started", config.getThreads());
 
-        executor.shutdown();
-        boolean finished = executor.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
-        if (!finished) {
-            log.warn("Executor timed out — forcing shutdown");
-            executor.shutdownNow();
+        exec.shutdown();
+        exec.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
+
+        // Signal consumers and wait for them to drain
+        stopFlag.set(true);
+        if (consumerThread != null) {
+            consumerThread.join((long) config.getConsumerReceiveTimeout() * 2 + 5000);
         }
 
         if (durationTimer != null) durationTimer.shutdownNow();
         pool.close();
 
-        // Report validation summary
-        if (validator != null) {
-            log.info("Schema validation summary — passed={} failed={}",
+        if (validator != null)
+            log.info("Schema validation — passed={} failed={}",
                     validator.getPassCount(), validator.getFailCount());
-        }
-        log.info("ID generator summary — last issued id={}",
-                idGenerator.lastIssued());
+        log.info("ID generator — last issued id={}", idGenerator.lastIssued());
 
         int errorCount = 0;
         for (Future<?> f : futures) {
@@ -131,18 +131,12 @@ public class ProducerOrchestrator {
                 errorCount++;
             }
         }
-
-        log.info("All producers finished. Total sent={}, errors={}",
-                globalCounter.get(), errorCount);
+        log.info("All producers finished. Total sent={}, errors={}", globalCounter.get(), errorCount);
     }
 
-    // ─── Thread factory ───────────────────────────────────────────────────────
-
-    private static class ProducerThreadFactory implements java.util.concurrent.ThreadFactory {
+    private static class ProducerThreadFactory implements ThreadFactory {
         private final AtomicLong idx = new AtomicLong(0);
-
-        @Override
-        public Thread newThread(Runnable r) {
+        @Override public Thread newThread(Runnable r) {
             Thread t = new Thread(r, "producer-" + idx.getAndIncrement());
             t.setDaemon(false);
             return t;

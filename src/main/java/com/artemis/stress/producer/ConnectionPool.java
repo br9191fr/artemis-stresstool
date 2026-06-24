@@ -16,23 +16,16 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Manages a pool of JMS connections using the programmatic TransportConfiguration
- * API (bypasses Artemis URL schema registry entirely).
+ * Manages a pool of shared JMS connections.
  *
- * Credential handling:
- *  - SSL connections  → authenticated by X.509 client certificate (no user/password)
- *  - Plain TCP        → user/password extracted from broker URL query string
- *                       (e.g. tcp://localhost:61616?user=admin&password=secret)
- *                       and passed to createConnection(user, password)
+ * Credential priority:
+ *   1. Explicit --user / --password CLI flags
+ *   2. user= / password= embedded in broker URL query string
+ *   3. null → X.509 certificate auth or anonymous
  */
 public class ConnectionPool implements AutoCloseable {
 
@@ -44,25 +37,19 @@ public class ConnectionPool implements AutoCloseable {
     public ConnectionPool(StressConfig config) {
         connections = new ArrayList<>(config.getConnectionPoolSize());
 
-        // Parse credentials from URL before building the factory
-        String[] creds = extractCredentials(config.getBrokerUrl());
-        String user     = creds[0];  // null if not present
-        String password = creds[1];  // null if not present
+        String user     = resolveCredential(config.getUser(),     "user",     config.getBrokerUrl());
+        String password = resolveCredential(config.getPassword(), "password", config.getBrokerUrl());
 
         ConnectionFactory factory = buildFactory(config);
 
         for (int i = 0; i < config.getConnectionPoolSize(); i++) {
             try {
-                Connection conn;
-                if (user != null) {
-                    log.info("Authenticating as user '{}'", user);
-                    conn = factory.createConnection(user, password);
-                } else {
-                    conn = factory.createConnection();
-                }
+                Connection conn = (user != null)
+                        ? factory.createConnection(user, password)
+                        : factory.createConnection();
                 conn.start();
                 connections.add(conn);
-                log.info("JMS connection #{} established to {}", i + 1, config.getBrokerUrl());
+                log.info("JMS connection #{} established", i + 1);
             } catch (JMSException e) {
                 closeAll();
                 throw new RuntimeException(
@@ -78,7 +65,8 @@ public class ConnectionPool implements AutoCloseable {
         return connections.get(idx);
     }
 
-    @Override public void close() { closeAll(); }
+    @Override
+    public void close() { closeAll(); }
 
     private void closeAll() {
         for (Connection c : connections) {
@@ -94,16 +82,15 @@ public class ConnectionPool implements AutoCloseable {
     // ─── Factory ─────────────────────────────────────────────────────────────
 
     private ConnectionFactory buildFactory(StressConfig config) {
-        // Parse host:port only (credentials handled separately via createConnection)
         String host = "localhost";
-        int    port  = 61616;
+        int    port = 61616;
         try {
             String raw = config.getBrokerUrl()
                     .replaceFirst("\\?.*$", "")
                     .replaceAll("^(ssl|tcp)://", "tcp://");
             URI uri = new URI(raw);
             if (uri.getHost() != null) host = uri.getHost();
-            if (uri.getPort() > 0)    port = uri.getPort();
+            if (uri.getPort() > 0)    port  = uri.getPort();
         } catch (Exception e) {
             log.warn("Cannot parse broker URL '{}', using {}:{}", config.getBrokerUrl(), host, port);
         }
@@ -112,8 +99,7 @@ public class ConnectionPool implements AutoCloseable {
         params.put(TransportConstants.HOST_PROP_NAME, host);
         params.put(TransportConstants.PORT_PROP_NAME, port);
 
-        boolean useSsl = config.getKeystorePath() != null;
-        if (useSsl) {
+        if (config.getKeystorePath() != null) {
             String ksPath = resolveAbsolutePath(config.getKeystorePath());
             String tsPath = resolveAbsolutePath(config.getTruststorePath());
             String ksType = detectStoreType(config.getKeystoreType(), ksPath);
@@ -128,16 +114,13 @@ public class ConnectionPool implements AutoCloseable {
             params.put(TransportConstants.TRUSTSTORE_TYPE_PROP_NAME,     tsType);
             params.put(TransportConstants.ENABLED_PROTOCOLS_PROP_NAME,   config.getTlsVersion());
 
-            log.info("SSL transport — host={} port={}", host, port);
-            log.info("  keystore  : {} (type={})", ksPath, ksType);
-            log.info("  truststore: {} (type={})", tsPath, tsType);
+            log.info("SSL transport — host={} port={} ks={} ts={}", host, port, ksPath, tsPath);
         } else {
             log.info("Plain TCP transport — host={} port={}", host, port);
         }
 
         TransportConfiguration tc = new TransportConfiguration(
                 NettyConnectorFactory.class.getName(), params);
-
         try {
             return ActiveMQJMSClient.createConnectionFactoryWithoutHA(JMSFactoryType.CF, tc);
         } catch (Exception e) {
@@ -145,45 +128,27 @@ public class ConnectionPool implements AutoCloseable {
         }
     }
 
-    // ─── Credential extraction ────────────────────────────────────────────────
+    // ─── Credential helpers ───────────────────────────────────────────────────
 
-    /**
-     * Extracts {@code user} and {@code password} from the broker URL query string.
-     *
-     * <p>Example: {@code tcp://localhost:61616?user=admin&password=secret}
-     * returns {@code ["admin", "secret"]}.</p>
-     *
-     * <p>Returns {@code [null, null]} when neither parameter is present
-     * (SSL certificate auth or anonymous).</p>
-     */
-    private String[] extractCredentials(String brokerUrl) {
-        String user     = null;
-        String password = null;
-
-        int qmark = brokerUrl.indexOf('?');
-        if (qmark < 0) return new String[]{null, null};
-
-        String query = brokerUrl.substring(qmark + 1);
-        Map<String, String> params = parseQueryString(query);
-        user     = params.get("user");
-        password = params.get("password");
-
-        return new String[]{user, password};
+    private String resolveCredential(String explicit, String paramName, String brokerUrl) {
+        if (explicit != null && !explicit.isBlank()) {
+            log.info("Using explicit --{} flag", paramName);
+            return explicit;
+        }
+        String fromUrl = extractQueryParam(brokerUrl, paramName);
+        if (fromUrl != null) log.info("Using {} from broker URL query string", paramName);
+        return fromUrl;
     }
 
-    /** Minimal query-string parser — handles {@code key=value&key=value}. */
-    private Map<String, String> parseQueryString(String query) {
-        Map<String, String> map = new LinkedHashMap<>();
-        if (query == null || query.isEmpty()) return map;
-        for (String pair : query.split("&")) {
+    private String extractQueryParam(String url, String name) {
+        int q = url.indexOf('?');
+        if (q < 0) return null;
+        for (String pair : url.substring(q + 1).split("&")) {
             int eq = pair.indexOf('=');
-            if (eq > 0) {
-                String k = pair.substring(0, eq).trim();
-                String v = pair.substring(eq + 1).trim();
-                map.put(k, v);
-            }
+            if (eq > 0 && pair.substring(0, eq).trim().equals(name))
+                return pair.substring(eq + 1).trim();
         }
-        return map;
+        return null;
     }
 
     // ─── Path / type helpers ──────────────────────────────────────────────────
@@ -193,28 +158,23 @@ public class ConnectionPool implements AutoCloseable {
         Path p   = Paths.get(path);
         Path abs = p.isAbsolute() ? p : Paths.get("").toAbsolutePath().resolve(p).normalize();
         if (!Files.exists(abs)) {
-            log.error("┌─ STORE FILE NOT FOUND ─────────────────────────────────");
-            log.error("│  Input path  : {}", path);
-            log.error("│  Resolved to : {}", abs);
-            log.error("│  Working dir : {}", Paths.get("").toAbsolutePath());
-            log.error("└─ Use an absolute path, e.g.: /home/user/certs/client.p12");
+            log.error("Store file NOT FOUND: {} (resolved from '{}')", abs, path);
+            log.error("Working dir: {}", Paths.get("").toAbsolutePath());
         } else {
-            log.info("  store file OK: {}", abs);
+            log.info("  store OK: {}", abs);
         }
         return abs.toString();
     }
 
-    /** Auto-detects PKCS12 from .p12/.pfx extension. */
-    private String detectStoreType(String configuredType, String path) {
-        if (path == null) return configuredType;
+    private String detectStoreType(String configured, String path) {
+        if (path == null) return configured;
         String lower = path.toLowerCase();
         if (lower.endsWith(".p12") || lower.endsWith(".pfx")) {
-            if (!"PKCS12".equalsIgnoreCase(configuredType)) {
-                log.info("  auto-detected store type PKCS12 (was configured as: {})", configuredType);
-            }
+            if (!"PKCS12".equalsIgnoreCase(configured))
+                log.info("  auto-detected PKCS12 from extension (was: {})", configured);
             return "PKCS12";
         }
         if (lower.endsWith(".jks")) return "JKS";
-        return configuredType;
+        return configured;
     }
 }

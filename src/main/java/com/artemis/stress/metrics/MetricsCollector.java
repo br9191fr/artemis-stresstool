@@ -8,184 +8,171 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Thread-safe metrics collector.
- *
- * <p>Tracks:
- * <ul>
- *   <li>Total messages sent (excluding warmup)</li>
- *   <li>Total bytes sent</li>
- *   <li>End-to-end send latency (ns) — min / max / sum for mean calculation</li>
- *   <li>HDR-style histogram buckets for latency percentiles (p50 / p90 / p99 / p999)</li>
- *   <li>Error count</li>
- * </ul>
- * </p>
- *
- * <p>Uses lock-free {@link LongAdder} and {@link AtomicLong} for high
- * concurrency. The histogram uses pre-allocated buckets sized in powers-of-two
- * nanosecond ranges — no external HdrHistogram dependency required.</p>
+ * Thread-safe metrics collector for producer (send latency) and
+ * consumer (end-to-end latency) sides.
  */
 public class MetricsCollector {
 
     private static final Logger log = LoggerFactory.getLogger(MetricsCollector.class);
+    private static final int BUCKETS = 32;
 
-    // Warmup gate
-    private final int warmupTotal;
-    private final LongAdder warmupCounter = new LongAdder();
-    private final AtomicBoolean warmupDone = new AtomicBoolean(false);
+    // Warmup
+    private final int           warmupTotal;
+    private final LongAdder     warmupCounter = new LongAdder();
+    private final AtomicBoolean warmupDone    = new AtomicBoolean(false);
 
-    // Core counters
-    private final LongAdder messageCount  = new LongAdder();
-    private final LongAdder bytesCount    = new LongAdder();
-    private final LongAdder errorCount    = new LongAdder();
-    private final LongAdder latencySum    = new LongAdder(); // nanoseconds
+    // Producer counters
+    private final LongAdder  sendCount  = new LongAdder();
+    private final LongAdder  sendBytes  = new LongAdder();
+    private final LongAdder  sendErrors = new LongAdder();
+    private final LongAdder  sendLatSum = new LongAdder();
+    private final AtomicLong sendLatMin = new AtomicLong(Long.MAX_VALUE);
+    private final AtomicLong sendLatMax = new AtomicLong(0);
+    private final LongAdder[] sendHisto = initBuckets();
 
-    private final AtomicLong latencyMin   = new AtomicLong(Long.MAX_VALUE);
-    private final AtomicLong latencyMax   = new AtomicLong(0);
+    // Consumer counters
+    private final LongAdder  e2eCount   = new LongAdder();
+    private final LongAdder  e2eErrors  = new LongAdder();
+    private final LongAdder  e2eLatSum  = new LongAdder();
+    private final AtomicLong e2eLatMin  = new AtomicLong(Long.MAX_VALUE);
+    private final AtomicLong e2eLatMax  = new AtomicLong(0);
+    private final LongAdder[] e2eHisto  = initBuckets();
 
-    // Histogram: 32 buckets, each covering a doubling range in nanoseconds.
-    // Bucket i covers [2^i .. 2^(i+1)) ns.
-    // Bucket 0  = <1 ns  (practically impossible, but captured)
-    // Bucket 10 = ~1 µs
-    // Bucket 20 = ~1 ms
-    // Bucket 30 = ~1 s
-    private static final int BUCKET_COUNT = 32;
-    private final LongAdder[] histogram = new LongAdder[BUCKET_COUNT];
+    // Throughput snapshots — shared timestamp for both rates
+    private volatile long snapTs      = System.currentTimeMillis();
+    private volatile long snapSend    = 0;
+    private volatile long snapE2e     = 0;
 
-    // Throughput snapshot for live reporting
-    private volatile long snapshotTs = System.currentTimeMillis();
-    private volatile long snapshotCount = 0;
-
-    // Start time
     private final long startNano = System.nanoTime();
 
     public MetricsCollector(int warmupMessages) {
         this.warmupTotal = warmupMessages;
-        for (int i = 0; i < BUCKET_COUNT; i++) {
-            histogram[i] = new LongAdder();
-        }
     }
 
     // ─── Recording ────────────────────────────────────────────────────────────
 
-    public void recordSuccess(long latencyNs, int bytes) {
-        // Handle warmup phase
-        if (!warmupDone.get()) {
-            long wc = warmupCounter.sumThenReset();
-            warmupCounter.add(wc + 1);
-            if (wc + 1 >= warmupTotal) {
-                if (warmupDone.compareAndSet(false, true)) {
-                    log.info("Warmup complete ({} messages) — metrics recording started", warmupTotal);
-                    // Reset snapshot baseline
-                    snapshotTs    = System.currentTimeMillis();
-                    snapshotCount = 0;
-                }
-            }
-            return; // don't count warmup in metrics
-        }
-
-        messageCount.increment();
-        bytesCount.add(bytes);
-        latencySum.add(latencyNs);
-
-        // Min / Max (optimistic spin)
-        updateMin(latencyNs);
-        updateMax(latencyNs);
-
-        // Histogram bucket
-        int bucket = bucketFor(latencyNs);
-        histogram[bucket].increment();
+    public void recordSend(long latencyNs, int bytes) {
+        if (!isWarmupDone()) { tickWarmup(); return; }
+        sendCount.increment();
+        sendBytes.add(bytes);
+        sendLatSum.add(latencyNs);
+        updateMin(sendLatMin, latencyNs);
+        updateMax(sendLatMax, latencyNs);
+        sendHisto[bucket(latencyNs)].increment();
     }
 
-    public void recordError() {
-        errorCount.increment();
+    public void recordSendError() { sendErrors.increment(); }
+
+    public void recordE2e(long latencyNs) {
+        e2eCount.increment();
+        e2eLatSum.add(latencyNs);
+        updateMin(e2eLatMin, latencyNs);
+        updateMax(e2eLatMax, latencyNs);
+        e2eHisto[bucket(latencyNs)].increment();
     }
+
+    public void recordE2eError() { e2eErrors.increment(); }
 
     // ─── Accessors ────────────────────────────────────────────────────────────
 
-    public long getMessageCount()   { return messageCount.sum(); }
-    public long getBytesCount()     { return bytesCount.sum(); }
-    public long getErrorCount()     { return errorCount.sum(); }
-    public boolean hasErrors()      { return errorCount.sum() > 0; }
-    public boolean isWarmupDone()   { return warmupDone.get(); }
+    public long    getSendCount()    { return sendCount.sum(); }
+    public long    getSendBytes()    { return sendBytes.sum(); }
+    public long    getSendErrors()   { return sendErrors.sum(); }
+    public long    getE2eCount()     { return e2eCount.sum(); }
+    public long    getE2eErrors()    { return e2eErrors.sum(); }
+    public boolean hasErrors()       { return sendErrors.sum() > 0 || e2eErrors.sum() > 0; }
+    public boolean isWarmupDone()    { return warmupDone.get(); }
+    public long    elapsedMs()       { return (System.nanoTime() - startNano) / 1_000_000; }
 
-    public long getLatencyMinNs()   {
-        long v = latencyMin.get();
-        return v == Long.MAX_VALUE ? 0 : v;
-    }
-    public long getLatencyMaxNs()   { return latencyMax.get(); }
-    public long getLatencyMeanNs()  {
-        long count = messageCount.sum();
-        return count == 0 ? 0 : latencySum.sum() / count;
-    }
-
-    /** Elapsed time since collector was created (in milliseconds). */
-    public long elapsedMs() {
-        return (System.nanoTime() - startNano) / 1_000_000;
+    public long getSendLatMinNs()  { long v = sendLatMin.get(); return v == Long.MAX_VALUE ? 0 : v; }
+    public long getSendLatMaxNs()  { return sendLatMax.get(); }
+    public long getSendLatMeanNs() { long c = sendCount.sum(); return c == 0 ? 0 : sendLatSum.sum() / c; }
+    public long getSendPercentileNs(double p) {
+        return percentile(sendHisto, sendCount.sum(), p, getSendLatMaxNs());
     }
 
-    /**
-     * Current throughput in messages/second (since last snapshot call).
-     * Thread-safe but not perfectly precise at very high call rates.
-     */
-    public double currentThroughput() {
+    public long getE2eLatMinNs()   { long v = e2eLatMin.get(); return v == Long.MAX_VALUE ? 0 : v; }
+    public long getE2eLatMaxNs()   { return e2eLatMax.get(); }
+    public long getE2eLatMeanNs()  { long c = e2eCount.sum(); return c == 0 ? 0 : e2eLatSum.sum() / c; }
+    public long getE2ePercentileNs(double p) {
+        return percentile(e2eHisto, e2eCount.sum(), p, getE2eLatMaxNs());
+    }
+
+    /** Send throughput msg/s since last call. */
+    public double currentSendRate() {
         long now   = System.currentTimeMillis();
-        long count = messageCount.sum();
-        long dtMs  = now - snapshotTs;
-        if (dtMs == 0) return 0;
-        double rate = (double)(count - snapshotCount) / dtMs * 1000.0;
-        snapshotTs    = now;
-        snapshotCount = count;
-        return rate;
+        long count = sendCount.sum();
+        long dt    = now - snapTs;
+        long delta = count - snapSend;
+        snapTs   = now;
+        snapSend = count;
+        return dt == 0 ? 0.0 : (double) delta / dt * 1000.0;
     }
 
-    /** Overall average throughput since warmup completed. */
-    public double overallThroughput() {
-        long ms = elapsedMs();
-        return ms == 0 ? 0 : (double) messageCount.sum() / ms * 1000.0;
+    /** Consume throughput msg/s since last call. */
+    public double currentE2eRate() {
+        long now   = System.currentTimeMillis();
+        long count = e2eCount.sum();
+        long dt    = now - snapTs;       // same window as send rate
+        long delta = count - snapE2e;
+        snapE2e = count;
+        return dt == 0 ? 0.0 : (double) delta / dt * 1000.0;
     }
 
-    /**
-     * Returns the approximate percentile latency in nanoseconds.
-     * Uses histogram bucket analysis.
-     *
-     * @param percentile e.g. 0.50, 0.90, 0.99, 0.999
-     */
-    public long getPercentileNs(double percentile) {
-        long total = messageCount.sum();
-        if (total == 0) return 0;
-
-        long target = (long) Math.ceil(total * percentile);
-        long cumulative = 0;
-
-        for (int i = 0; i < BUCKET_COUNT; i++) {
-            cumulative += histogram[i].sum();
-            if (cumulative >= target) {
-                // Return midpoint of the bucket range
-                long bucketStart = i == 0 ? 0 : (1L << i);
-                long bucketEnd   = (1L << (i + 1)) - 1;
-                return (bucketStart + bucketEnd) / 2;
-            }
-        }
-        return getLatencyMaxNs();
+    public double overallSendRate() {
+        long ms = elapsedMs(); return ms == 0 ? 0.0 : (double) sendCount.sum() / ms * 1000.0;
+    }
+    public double overallE2eRate() {
+        long ms = elapsedMs(); return ms == 0 ? 0.0 : (double) e2eCount.sum() / ms * 1000.0;
     }
 
     // ─── Internals ────────────────────────────────────────────────────────────
 
-    private int bucketFor(long ns) {
+    private void tickWarmup() {
+        warmupCounter.increment();
+        if (warmupCounter.sum() >= warmupTotal && warmupDone.compareAndSet(false, true)) {
+            log.info("Warmup complete ({} messages) — recording started", warmupTotal);
+            snapTs = System.currentTimeMillis();
+        }
+    }
+
+    private long percentile(LongAdder[] histo, long total, double p, long max) {
+        if (total == 0) return 0;
+        long target = (long) Math.ceil(total * p), cum = 0;
+        for (int i = 0; i < BUCKETS; i++) {
+            cum += histo[i].sum();
+            if (cum >= target) return ((i == 0 ? 0L : 1L << i) + (1L << (i + 1)) - 1) / 2;
+        }
+        return max;
+    }
+
+    private int bucket(long ns) {
         if (ns <= 0) return 0;
-        int bit = 63 - Long.numberOfLeadingZeros(ns);
-        return Math.min(bit, BUCKET_COUNT - 1);
+        return Math.min(63 - Long.numberOfLeadingZeros(ns), BUCKETS - 1);
     }
 
-    private void updateMin(long ns) {
-        long current;
-        do { current = latencyMin.get(); }
-        while (ns < current && !latencyMin.compareAndSet(current, ns));
+    private void updateMin(AtomicLong ref, long val) {
+        long cur; do { cur = ref.get(); } while (val < cur && !ref.compareAndSet(cur, val));
+    }
+    private void updateMax(AtomicLong ref, long val) {
+        long cur; do { cur = ref.get(); } while (val > cur && !ref.compareAndSet(cur, val));
+    }
+    private static LongAdder[] initBuckets() {
+        LongAdder[] b = new LongAdder[BUCKETS];
+        for (int i = 0; i < BUCKETS; i++) b[i] = new LongAdder();
+        return b;
     }
 
-    private void updateMax(long ns) {
-        long current;
-        do { current = latencyMax.get(); }
-        while (ns > current && !latencyMax.compareAndSet(current, ns));
-    }
+    // Legacy aliases so unchanged producer code compiles
+    public void   recordSuccess(long ns, int bytes) { recordSend(ns, bytes); }
+    public void   recordError()                     { recordSendError(); }
+    public long   getMessageCount()                 { return getSendCount(); }
+    public long   getErrorCount()                   { return getSendErrors(); }
+    public long   getBytesCount()                   { return getSendBytes(); }
+    public long   getLatencyMinNs()                 { return getSendLatMinNs(); }
+    public long   getLatencyMaxNs()                 { return getSendLatMaxNs(); }
+    public long   getLatencyMeanNs()                { return getSendLatMeanNs(); }
+    public long   getPercentileNs(double p)         { return getSendPercentileNs(p); }
+    public double currentThroughput()               { return currentSendRate(); }
+    public double overallThroughput()               { return overallSendRate(); }
 }
