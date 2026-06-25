@@ -25,6 +25,7 @@
         <picocli.version>4.7.5</picocli.version>
         <junit.version>5.10.1</junit.version>
         <micrometer.version>1.12.2</micrometer.version>
+        <otel.version>1.38.0</otel.version>
     </properties>
 
     <dependencies>
@@ -85,7 +86,33 @@
             <artifactId>micrometer-core</artifactId>
             <version>${micrometer.version}</version>
         </dependency>
+        <!-- OpenTelemetry API -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+            <version>${otel.version}</version>
+        </dependency>
 
+        <!-- OpenTelemetry SDK -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk</artifactId>
+            <version>${otel.version}</version>
+        </dependency>
+
+        <!-- OTLP/gRPC metrics exporter -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+            <version>${otel.version}</version>
+        </dependency>
+
+        <!-- Semantic conventions (ResourceAttributes) -->
+        <dependency>
+            <groupId>io.opentelemetry.semconv</groupId>
+            <artifactId>opentelemetry-semconv</artifactId>
+            <version>1.25.0-alpha</version>
+        </dependency>
         <!-- Test -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
