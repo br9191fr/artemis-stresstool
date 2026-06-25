@@ -9,26 +9,30 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jms.*;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A single producer thread. Stamps sendTimestampNs and numericId as JMS
- * properties on every message so the consumer can measure end-to-end latency
- * and detect duplicates.
+ * A single producer thread.
+ *
+ * Each message carries three JMS properties used by the consumer:
+ *   messageUuid     — random UUID, unique per message, used for duplicate detection.
+ *   sendTimestampNs — System.nanoTime() just before send, for E2E latency.
+ *   numericId       — monotonic counter from MessageIdGenerator (informational).
  */
 public class XmlProducer implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(XmlProducer.class);
 
-    private final int              id;
-    private final StressConfig     config;
-    private final ConnectionPool   pool;
+    private final int                 id;
+    private final StressConfig        config;
+    private final ConnectionPool      pool;
     private final XmlPayloadGenerator xmlGen;
     private final XmlSchemaValidator  validator;
-    private final MetricsCollector metrics;
-    private final AtomicLong       globalCounter;
-    private final AtomicBoolean    stopFlag;
+    private final MetricsCollector    metrics;
+    private final AtomicLong          globalCounter;
+    private final AtomicBoolean       stopFlag;
 
     private long tokenBucketTokens;
     private long tokenBucketLastRefill;
@@ -42,14 +46,14 @@ public class XmlProducer implements Runnable {
                        MetricsCollector metrics,
                        AtomicLong globalCounter,
                        AtomicBoolean stopFlag) {
-        this.id             = id;
-        this.config         = config;
-        this.pool           = pool;
-        this.xmlGen         = xmlGen;
-        this.validator      = validator;
-        this.metrics        = metrics;
-        this.globalCounter  = globalCounter;
-        this.stopFlag       = stopFlag;
+        this.id                    = id;
+        this.config                = config;
+        this.pool                  = pool;
+        this.xmlGen                = xmlGen;
+        this.validator             = validator;
+        this.metrics               = metrics;
+        this.globalCounter         = globalCounter;
+        this.stopFlag              = stopFlag;
         this.tokenBucketTokens     = config.getRatePerThread();
         this.tokenBucketLastRefill = System.nanoTime();
     }
@@ -57,8 +61,8 @@ public class XmlProducer implements Runnable {
     @Override
     public void run() {
         Connection connection = pool.borrow();
-        boolean transacted = config.getBatchSize() > 0;
-        int batchCount = 0;
+        boolean transacted  = config.getBatchSize() > 0;
+        int     batchCount  = 0;
 
         try (Session session = connection.createSession(
                 transacted,
@@ -92,18 +96,22 @@ public class XmlProducer implements Runnable {
                     } catch (XmlSchemaValidator.XmlValidationException ve) {
                         metrics.recordSendError();
                         if (metrics.getSendErrors() <= 5)
-                            log.error("Producer #{} validation error seq={}: {}", id, seq, ve.getMessage());
+                            log.error("Producer #{} validation error seq={}: {}",
+                                    id, seq, ve.getMessage());
                         continue;
                     }
                 }
 
                 TextMessage msg = session.createTextMessage(xml);
 
-                // Stamp send time (nanoTime) and numericId for consumer-side measurement
+                // Unique UUID per message — primary key for duplicate detection
+                String msgUuid = UUID.randomUUID().toString();
+                msg.setStringProperty(XmlConsumer.PROP_MESSAGE_UUID, msgUuid);
+
+                // Stamp send time as late as possible for accurate E2E latency
                 long sendTs = System.nanoTime();
                 msg.setLongProperty(XmlConsumer.PROP_SEND_TS,    sendTs);
                 msg.setLongProperty(XmlConsumer.PROP_NUMERIC_ID, seq);
-                msg.setLongProperty("seq", seq);
                 msg.setIntProperty("producerId", id);
                 msg.setStringProperty("contentType", "application/xml");
 
@@ -128,7 +136,9 @@ public class XmlProducer implements Runnable {
 
             if (transacted && batchCount > 0) {
                 try { session.commit(); }
-                catch (JMSException e) { log.warn("Producer #{} final commit failed: {}", id, e.getMessage()); }
+                catch (JMSException e) {
+                    log.warn("Producer #{} final commit failed: {}", id, e.getMessage());
+                }
             }
 
             producer.close();
@@ -151,7 +161,7 @@ public class XmlProducer implements Runnable {
     }
 
     private void throttle() {
-        long now = System.nanoTime();
+        long now     = System.nanoTime();
         long elapsed = now - tokenBucketLastRefill;
         if (elapsed >= TOKEN_BUCKET_REFILL_NS) {
             long periods = elapsed / TOKEN_BUCKET_REFILL_NS;
