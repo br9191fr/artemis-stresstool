@@ -16,8 +16,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Orchestrates producer threads and, in BOTH mode, starts consumers
- * concurrently then signals them to stop after all producers finish.
+ * Orchestrates producer threads across one or more runs.
+ *
+ * <p>The effective message limit per run is computed as:
+ * <pre>
+ *   effectiveLimit = totalMessages × threadCount
+ * </pre>
+ * This ensures {@code --messages N} means <em>N messages per thread</em>,
+ * not N messages shared across all threads.</p>
  */
 public class ProducerOrchestrator {
 
@@ -32,10 +38,8 @@ public class ProducerOrchestrator {
     }
 
     public void run() throws InterruptedException {
-        AtomicLong    globalCounter = new AtomicLong(0);
-        AtomicBoolean stopFlag      = new AtomicBoolean(false);
-
-        MessageIdGenerator idGenerator = new MessageIdGenerator(config.getIdStartValue());
+        AtomicBoolean stopFlag   = new AtomicBoolean(false);
+        MessageIdGenerator idGen = new MessageIdGenerator(config.getIdStartValue());
 
         XmlSchemaValidator validator = null;
         if (config.isSchemaValidation()) {
@@ -47,7 +51,7 @@ public class ProducerOrchestrator {
 
         XmlPayloadGenerator xmlGen;
         try {
-            xmlGen = new XmlPayloadGenerator(config, idGenerator);
+            xmlGen = new XmlPayloadGenerator(config, idGen);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialise XmlPayloadGenerator", e);
         }
@@ -70,7 +74,28 @@ public class ProducerOrchestrator {
             throw new RuntimeException(e);
         }
 
-        // Duration timer
+        // effectiveLimit = messages per thread × number of threads
+        // 0 means unlimited (when totalMessages == 0)
+        final long effectiveLimit = config.getTotalMessages() == 0
+                ? 0
+                : config.getTotalMessages() * config.getThreads();
+
+        int totalRuns = Math.max(1, config.getRuns());
+
+        if (effectiveLimit > 0) {
+            log.info("{} thread(s) × {} msg/thread = {} msg/run × {} run(s) = {} total messages",
+                    config.getThreads(), config.getTotalMessages(),
+                    effectiveLimit, totalRuns,
+                    effectiveLimit * totalRuns);
+        } else {
+            log.info("{} thread(s) unlimited × {} run(s)", config.getThreads(), totalRuns);
+        }
+        if (config.getBurstSize() > 0) {
+            log.info("Burst: {} msg then pause {}s",
+                    config.getBurstSize(), config.getBurstPauseSeconds());
+        }
+
+        // Duration timer (covers total wall time across all runs)
         ScheduledExecutorService durationTimer = null;
         if (config.getDurationSeconds() > 0) {
             durationTimer = Executors.newSingleThreadScheduledExecutor(
@@ -81,7 +106,7 @@ public class ProducerOrchestrator {
             }, config.getDurationSeconds(), TimeUnit.SECONDS);
         }
 
-        // BOTH mode: start consumers BEFORE producers so no messages are missed
+        // BOTH mode: start consumers ONCE before the first run
         Thread consumerThread = null;
         if (config.getMode() == StressConfig.Mode.BOTH) {
             ConsumerOrchestrator co = new ConsumerOrchestrator(config, pool, metrics);
@@ -92,24 +117,59 @@ public class ProducerOrchestrator {
             }, "consumer-orchestrator");
             consumerThread.setDaemon(false);
             consumerThread.start();
-            log.info("Consumers started — producers starting now");
+            log.info("Consumers started — will run across all {} run(s)", totalRuns);
         }
 
-        // Launch producers
-        ExecutorService exec = Executors.newFixedThreadPool(
-                config.getThreads(), new ProducerThreadFactory());
+        // ── Run loop ──────────────────────────────────────────────────────────
+        for (int run = 0; run < totalRuns && !stopFlag.get(); run++) {
+            long runStart = System.currentTimeMillis();
 
-        List<Future<?>> futures = new ArrayList<>(config.getThreads());
-        for (int i = 0; i < config.getThreads(); i++) {
-            futures.add(exec.submit(new XmlProducer(
-                    i, config, pool, xmlGen, validator, metrics, globalCounter, stopFlag)));
+            // Fresh counter per run — reset to 0 so each run allows effectiveLimit messages
+            AtomicLong runCounter = new AtomicLong(0);
+
+            log.info("═══ RUN {}/{} starting (limit={}) ═══",
+                    run + 1, totalRuns,
+                    effectiveLimit == 0 ? "unlimited" : effectiveLimit + " msg");
+
+            ExecutorService exec = Executors.newFixedThreadPool(
+                    config.getThreads(), new ProducerThreadFactory(run));
+
+            List<Future<?>> futures = new ArrayList<>(config.getThreads());
+            final XmlSchemaValidator fValidator = validator;
+            for (int i = 0; i < config.getThreads(); i++) {
+                futures.add(exec.submit(new XmlProducer(
+                        i, run, effectiveLimit,
+                        config, pool, xmlGen, fValidator,
+                        metrics, runCounter, stopFlag)));
+            }
+            log.info("Run {}/{} — {} producer thread(s) started", run + 1, totalRuns, config.getThreads());
+
+            exec.shutdown();
+            exec.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
+
+            long runMs = System.currentTimeMillis() - runStart;
+            log.info("═══ RUN {}/{} finished — sent={} elapsed={}ms ═══",
+                    run + 1, totalRuns, runCounter.get(), runMs);
+
+            for (Future<?> f : futures) {
+                try { f.get(); }
+                catch (ExecutionException e) {
+                    log.error("Producer thread failed in run {}: {}",
+                            run + 1, e.getCause().getMessage());
+                }
+            }
+
+            // Pause between runs (skip after the last run)
+            if (run < totalRuns - 1 && !stopFlag.get()) {
+                int pauseSec = config.getRunPauseSeconds();
+                if (pauseSec > 0) {
+                    log.info("Pausing {}s before run {}/{}...", pauseSec, run + 2, totalRuns);
+                    Thread.sleep(pauseSec * 1000L);
+                }
+            }
         }
-        log.info("All {} producer thread(s) started", config.getThreads());
 
-        exec.shutdown();
-        exec.awaitTermination(Long.MAX_VALUE, TimeUnit.SECONDS);
-
-        // Signal consumers and wait for them to drain
+        // Signal consumers to stop after all runs complete
         stopFlag.set(true);
         if (consumerThread != null) {
             consumerThread.join((long) config.getConsumerReceiveTimeout() * 2 + 5000);
@@ -121,23 +181,17 @@ public class ProducerOrchestrator {
         if (validator != null)
             log.info("Schema validation — passed={} failed={}",
                     validator.getPassCount(), validator.getFailCount());
-        log.info("ID generator — last issued id={}", idGenerator.lastIssued());
-
-        int errorCount = 0;
-        for (Future<?> f : futures) {
-            try { f.get(); }
-            catch (ExecutionException e) {
-                log.error("Producer thread failed: {}", e.getCause().getMessage(), e.getCause());
-                errorCount++;
-            }
-        }
-        log.info("All producers finished. Total sent={}, errors={}", globalCounter.get(), errorCount);
+        log.info("ID generator — last issued id={}", idGen.lastIssued());
+        log.info("All {} run(s) completed. Grand total sent={}",
+                totalRuns, idGen.lastIssued() - config.getIdStartValue() + 1);
     }
 
     private static class ProducerThreadFactory implements ThreadFactory {
+        private final int run;
         private final AtomicLong idx = new AtomicLong(0);
+        ProducerThreadFactory(int run) { this.run = run; }
         @Override public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "producer-" + idx.getAndIncrement());
+            Thread t = new Thread(r, "producer-r" + run + "-" + idx.getAndIncrement());
             t.setDaemon(false);
             return t;
         }

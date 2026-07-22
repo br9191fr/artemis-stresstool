@@ -31,19 +31,52 @@ public class StressConfig {
     private int    messageSize     = 1024;
     private String xmlTemplatePath;
 
+    // ── Burst / run parameters ────────────────────────────────────────────────
+    /**
+     * Number of messages each thread sends before pausing.
+     * 0 = no burst mode, send all messages in one continuous stream (original behaviour).
+     */
+    private int burstSize = 0;
+
+    /**
+     * Seconds each thread waits between bursts.
+     * Only used when burstSize > 0.
+     */
+    private int burstPauseSeconds = 0;
+
+    /**
+     * Number of complete test runs to execute sequentially.
+     * Each run sends totalMessages (or runs for durationSeconds).
+     * 0 or 1 = run once (original behaviour).
+     * Y > 1 = repeat Y times with a short gap between runs.
+     */
+    private int runs = 1;
+
+    /**
+     * Seconds to wait between runs when runs > 1.
+     * Default: 2 seconds to let the broker drain.
+     */
+    private int runPauseSeconds = 2;
+
+    // ── Consumer ──────────────────────────────────────────────────────────────
     private int  consumerThreads        = 1;
     private int  consumerReceiveTimeout = 5000;
 
+    // ── Schema ────────────────────────────────────────────────────────────────
     private boolean schemaValidation = true;
     private String  schemaPath;
     private long    idStartValue = 1L;
 
+    // ── JMS ───────────────────────────────────────────────────────────────────
     private boolean persistent         = true;
     private int     batchSize          = 0;
     private int     connectionPoolSize = 1;
 
+    // ── Reporting ─────────────────────────────────────────────────────────────
     private int warmupMessages        = 100;
     private int reportIntervalSeconds = 5;
+
+    // ─── Validation ───────────────────────────────────────────────────────────
 
     public void validate() {
         if (ssl != null) {
@@ -73,9 +106,26 @@ public class StressConfig {
             throw new IllegalArgumentException("messageSize must be >= 64 bytes");
         if (consumerThreads < 1)
             throw new IllegalArgumentException("consumerThreads must be >= 1");
+        if (burstSize < 0)
+            throw new IllegalArgumentException("burstSize must be >= 0");
+        if (burstPauseSeconds < 0)
+            throw new IllegalArgumentException("burstPauseSeconds must be >= 0");
+        if (runs < 1)
+            throw new IllegalArgumentException("runs must be >= 1");
+        if (runPauseSeconds < 0)
+            throw new IllegalArgumentException("runPauseSeconds must be >= 0");
+        if (burstSize > 0 && totalMessages > 0 && burstSize > totalMessages)
+            throw new IllegalArgumentException("burstSize (" + burstSize +
+                    ") must be <= totalMessages (" + totalMessages + ")");
     }
 
     public String summary() {
+        String burstDesc = burstSize > 0
+                ? burstSize + " msg then pause " + burstPauseSeconds + "s"
+                : "disabled (continuous)";
+        String runsDesc = runs > 1
+                ? runs + " runs, " + runPauseSeconds + "s between runs"
+                : "1 (single run)";
         return String.format("""
             Mode            : %s
             Broker URL      : %s
@@ -85,6 +135,8 @@ public class StressConfig {
             Total messages  : %s
             Duration limit  : %s
             Rate/thread     : %s msg/s
+            Burst mode      : %s
+            Runs            : %s
             Message size    : %d bytes
             Persistent      : %s
             Batch size      : %d (0=AUTO_ACK)
@@ -105,6 +157,8 @@ public class StressConfig {
             totalMessages == 0 ? "unlimited" : String.valueOf(totalMessages),
             durationSeconds == 0 ? "unlimited" : durationSeconds + "s",
             ratePerThread == 0 ? "max" : String.valueOf(ratePerThread),
+            burstDesc,
+            runsDesc,
             messageSize, persistent, batchSize, connectionPoolSize,
             keystorePath != null ? keystorePath : "(none)", keystoreType,
             truststorePath != null ? truststorePath : "(none)",
@@ -112,6 +166,8 @@ public class StressConfig {
             schemaPath != null ? schemaPath : "(bundled stress-message.xsd)",
             idStartValue, warmupMessages, reportIntervalSeconds);
     }
+
+    // ─── Nested SSL ───────────────────────────────────────────────────────────
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class SslConfig {
@@ -132,6 +188,8 @@ public class StressConfig {
         public String getTlsVersion()              { return tlsVersion; }
         public void   setTlsVersion(String v)      { this.tlsVersion = v; }
     }
+
+    // ─── Getters / Setters ────────────────────────────────────────────────────
 
     public Mode    getMode()                        { return mode; }
     public void    setMode(Mode v)                  { this.mode = v; }
@@ -173,6 +231,14 @@ public class StressConfig {
     public void    setMessageSize(int v)            { this.messageSize = v; }
     public String  getXmlTemplatePath()             { return xmlTemplatePath; }
     public void    setXmlTemplatePath(String v)     { this.xmlTemplatePath = v; }
+    public int     getBurstSize()                   { return burstSize; }
+    public void    setBurstSize(int v)              { this.burstSize = v; }
+    public int     getBurstPauseSeconds()           { return burstPauseSeconds; }
+    public void    setBurstPauseSeconds(int v)      { this.burstPauseSeconds = v; }
+    public int     getRuns()                        { return runs; }
+    public void    setRuns(int v)                   { this.runs = v; }
+    public int     getRunPauseSeconds()             { return runPauseSeconds; }
+    public void    setRunPauseSeconds(int v)        { this.runPauseSeconds = v; }
     public int     getConsumerThreads()             { return consumerThreads; }
     public void    setConsumerThreads(int v)        { this.consumerThreads = v; }
     public int     getConsumerReceiveTimeout()      { return consumerReceiveTimeout; }

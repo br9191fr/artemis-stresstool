@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Command(
     name = "artemis-stress",
     mixinStandardHelpOptions = true,
-    version = "1.2.0",
+    version = "1.3.0",
     description = "Multi-threaded XML stress tool for Apache Artemis"
 )
 public class StressToolMain implements Callable<Integer> {
@@ -82,10 +82,10 @@ public class StressToolMain implements Callable<Integer> {
     @Option(names = {"-n", "--threads"},           description = "Producer threads (default: 4)",               defaultValue = "4")
     private int threads;
 
-    @Option(names = {"-m", "--messages"},          description = "Total messages; 0=unlimited (default: 10000)", defaultValue = "10000")
+    @Option(names = {"-m", "--messages"},          description = "Messages per run per thread; 0=unlimited (default: 10000)", defaultValue = "10000")
     private long totalMessages;
 
-    @Option(names = {"--duration"},                description = "Max duration seconds; 0=no limit (default: 0)", defaultValue = "0")
+    @Option(names = {"--duration"},                description = "Max total duration seconds across all runs; 0=no limit (default: 0)", defaultValue = "0")
     private long durationSeconds;
 
     @Option(names = {"--rate"},                    description = "Target msg/s per producer thread; 0=max (default: 0)", defaultValue = "0")
@@ -97,11 +97,40 @@ public class StressToolMain implements Callable<Integer> {
     @Option(names = {"--xml-template"},            description = "XML template file")
     private String xmlTemplatePath;
 
+    // ── Burst / run parameters ─────────────────────────────────────────────────
+
+    @Option(names = {"--burst-size"},
+            description = "Messages each thread sends before pausing. " +
+                          "0 = no burst, send all messages continuously (default: 0)",
+            defaultValue = "0")
+    private int burstSize;
+
+    @Option(names = {"--burst-pause"},
+            description = "Seconds each thread waits between bursts (default: 0). " +
+                          "Only used when --burst-size > 0",
+            defaultValue = "0")
+    private int burstPauseSeconds;
+
+    @Option(names = {"--runs"},
+            description = "Number of complete test runs to execute sequentially (default: 1). " +
+                          "Each run sends --messages messages per thread.",
+            defaultValue = "1")
+    private int runs;
+
+    @Option(names = {"--run-pause"},
+            description = "Seconds to wait between runs (default: 2)",
+            defaultValue = "2")
+    private int runPauseSeconds;
+
+    // ── Consumer ──────────────────────────────────────────────────────────────
+
     @Option(names = {"--consumer-threads"},        description = "Consumer threads (default: 1)",               defaultValue = "1")
     private int consumerThreads;
 
     @Option(names = {"--consumer-timeout"},        description = "Consumer receive timeout ms (default: 5000)", defaultValue = "5000")
     private int consumerReceiveTimeout;
+
+    // ── JMS ───────────────────────────────────────────────────────────────────
 
     @Option(names = {"--persistent"},              description = "Persistent delivery (default: true)",          defaultValue = "true")
     private boolean persistent;
@@ -112,6 +141,8 @@ public class StressToolMain implements Callable<Integer> {
     @Option(names = {"--connection-pool"},         description = "Shared JMS connections (default: 1)",          defaultValue = "1")
     private int connectionPoolSize;
 
+    // ── Schema ────────────────────────────────────────────────────────────────
+
     @Option(names = {"--schema-validation"},       description = "Validate XML before send (default: true)",    defaultValue = "true")
     private boolean schemaValidation;
 
@@ -120,6 +151,8 @@ public class StressToolMain implements Callable<Integer> {
 
     @Option(names = {"--id-start"},                description = "First numeric ID value (default: 1)",          defaultValue = "1")
     private long idStartValue;
+
+    // ── Reporting ─────────────────────────────────────────────────────────────
 
     @Option(names = {"--warmup"},                  description = "Warmup messages excluded from metrics (default: 100)", defaultValue = "100")
     private int warmupMessages;
@@ -133,18 +166,13 @@ public class StressToolMain implements Callable<Integer> {
     // ── OpenTelemetry ─────────────────────────────────────────────────────────
 
     @Option(names = {"--otel-endpoint"},
-            description = "OTLP/gRPC endpoint for OpenTelemetry export, e.g. http://localhost:4317. " +
-                          "When omitted, OTel export is disabled.")
+            description = "OTLP/gRPC endpoint (e.g. http://localhost:4317). OTel disabled when omitted.")
     private String otelEndpoint;
 
-    @Option(names = {"--otel-service-name"},
-            description = "Value of the service.name resource attribute (default: artemis-stress-tool)",
-            defaultValue = "artemis-stress-tool")
+    @Option(names = {"--otel-service-name"},       description = "OTel service.name attribute (default: artemis-stress-tool)", defaultValue = "artemis-stress-tool")
     private String otelServiceName;
 
-    @Option(names = {"--otel-interval"},
-            description = "OTel metric export interval in milliseconds (default: 5000)",
-            defaultValue = "5000")
+    @Option(names = {"--otel-interval"},           description = "OTel metric export interval ms (default: 5000)", defaultValue = "5000")
     private long otelIntervalMs;
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -170,7 +198,6 @@ public class StressToolMain implements Callable<Integer> {
         reporterThread.setDaemon(true);
         reporterThread.start();
 
-        // Start OTel exporter if endpoint is configured
         OtelMetricsExporter otelExporter = null;
         if (otelEndpoint != null && !otelEndpoint.isBlank()) {
             otelExporter = new OtelMetricsExporter(
@@ -181,12 +208,12 @@ public class StressToolMain implements Callable<Integer> {
         try {
             switch (config.getMode()) {
 
-                case PRODUCE ->
+                case PRODUCE, BOTH ->
                     new ProducerOrchestrator(config, metrics).run();
 
                 case CONSUME -> {
-                    ConnectionPool pool     = new ConnectionPool(config);
-                    AtomicBoolean stopFlag  = new AtomicBoolean(false);
+                    ConnectionPool pool    = new ConnectionPool(config);
+                    AtomicBoolean stopFlag = new AtomicBoolean(false);
                     if (config.getDurationSeconds() > 0) {
                         Thread timer = new Thread(() -> {
                             try { Thread.sleep(config.getDurationSeconds() * 1000L); }
@@ -200,9 +227,6 @@ public class StressToolMain implements Callable<Integer> {
                     try { new ConsumerOrchestrator(config, pool, metrics).run(stopFlag); }
                     finally { pool.close(); }
                 }
-
-                case BOTH ->
-                    new ProducerOrchestrator(config, metrics).run();
             }
         } finally {
             reporter.stop();
@@ -242,6 +266,10 @@ public class StressToolMain implements Callable<Integer> {
         c.setRatePerThread(ratePerThread);
         c.setMessageSize(messageSize);
         c.setXmlTemplatePath(xmlTemplatePath);
+        c.setBurstSize(burstSize);
+        c.setBurstPauseSeconds(burstPauseSeconds);
+        c.setRuns(runs);
+        c.setRunPauseSeconds(runPauseSeconds);
         c.setConsumerThreads(consumerThreads);
         c.setConsumerReceiveTimeout(consumerReceiveTimeout);
         c.setPersistent(persistent);
@@ -258,8 +286,8 @@ public class StressToolMain implements Callable<Integer> {
     private void printBanner() {
         System.out.println("""
             ╔══════════════════════════════════════════════════════════╗
-            ║         ARTEMIS XML STRESS TOOL  v1.2.0                 ║
-            ║  Produce • Consume • E2E Latency • OpenTelemetry        ║
+            ║         ARTEMIS XML STRESS TOOL  v1.3.0                 ║
+            ║  Burst • Multi-run • E2E Latency • OpenTelemetry        ║
             ╚══════════════════════════════════════════════════════════╝
             """);
     }
